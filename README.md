@@ -7,6 +7,21 @@ API keys) and merges their answers into one consolidated response.
 Built on [LiteLLM](https://github.com/BerriAI/litellm) for provider abstraction,
 `asyncio` for concurrent fan-out, `rich` for output, and `pydantic` for config.
 
+It is **library-first** (the CLI is a thin shell over the same `Council` you import),
+returns **structured results** (per-model latency, token usage, and error capture), and is
+**partial-failure resilient** — one provider erroring never aborts the run. Keys are
+**bring-your-own**, referenced by environment-variable *name* only — never stored or
+logged. v0.1 ships the `synthesize` mode (merge answers into one); `debate`, `adversarial`,
+and `vote` modes are on the roadmap. conclave is intentionally lightweight — a small
+council primitive, not an agent framework.
+
+See the canonical spec and design docs:
+
+- [`docs/PRODUCT_DESIGN_DOCUMENT.md`](docs/PRODUCT_DESIGN_DOCUMENT.md) — canonical product
+  spec, council modes, security model, roadmap, positioning (the authority doc).
+- [`SYSTEM_CONTEXT_DIAGRAM.md`](SYSTEM_CONTEXT_DIAGRAM.md) — system context diagram.
+- [`DOCUMENTATION_INDEX.md`](DOCUMENTATION_INDEX.md) — master index of all docs + source.
+
 ## Install
 
 ```bash
