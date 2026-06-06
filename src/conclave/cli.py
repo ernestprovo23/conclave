@@ -3,6 +3,8 @@
 Two commands:
 
 * ``conclave ask "<prompt>" --council grok,gemini,claude --mode synthesize``
+  Modes: ``synthesize`` (default), ``raw``, ``debate`` (``--rounds N``),
+  ``adversarial`` (``--proposer NAME``).
 * ``conclave providers`` -- show which providers currently have a key (without
   ever printing key values).
 """
@@ -36,46 +38,105 @@ def _result_to_dict(result: CouncilResult) -> dict:
     return result.model_dump(mode="json")
 
 
-def _render_human(result: CouncilResult) -> None:
-    """Render raw answers + synthesis to the terminal with rich."""
+def _answer_panel(ans, *, border: str = "cyan") -> Panel:
+    """Build a rich panel for a single ModelAnswer (ok or failed)."""
+    if ans.ok:
+        usage = ans.usage.total_tokens if ans.usage else 0
+        subtitle = f"{ans.model_id} · {ans.latency_s:.2f}s · {usage} tok"
+        return Panel(
+            ans.answer or "",
+            title=f"[bold]{ans.name}[/bold]",
+            subtitle=subtitle,
+            border_style=border,
+        )
+    return Panel(
+        f"[red]{ans.error}[/red]",
+        title=f"[bold]{ans.name}[/bold] (failed)",
+        subtitle=ans.model_id,
+        border_style="red",
+    )
+
+
+def _print_skipped(result: CouncilResult) -> None:
+    """Print the skipped-no-key warning line if any members were skipped."""
     if result.skipped:
         err_console.print(
             f"[yellow]Skipped (no key): {', '.join(result.skipped)}[/yellow]"
         )
 
-    for ans in result.answers:
-        if ans.ok:
-            usage = ans.usage.total_tokens if ans.usage else 0
-            subtitle = f"{ans.model_id} · {ans.latency_s:.2f}s · {usage} tok"
-            console.print(
-                Panel(
-                    ans.answer or "",
-                    title=f"[bold]{ans.name}[/bold]",
-                    subtitle=subtitle,
-                    border_style="cyan",
-                )
-            )
-        else:
-            console.print(
-                Panel(
-                    f"[red]{ans.error}[/red]",
-                    title=f"[bold]{ans.name}[/bold] (failed)",
-                    subtitle=ans.model_id,
-                    border_style="red",
-                )
-            )
 
+def _print_synthesis(result: CouncilResult, title: str = "SYNTHESIS") -> None:
+    """Print the synthesis panel, or a warning if synthesis did not run."""
     if result.synthesis is not None:
         console.print(
             Panel(
                 result.synthesis,
-                title=f"[bold green]SYNTHESIS[/bold green] "
+                title=f"[bold green]{title}[/bold green] "
                 f"({result.synthesizer} · {result.synthesizer_model_id})",
                 border_style="green",
             )
         )
     elif result.synthesis_error:
-        err_console.print(f"[yellow]No synthesis: {result.synthesis_error}[/yellow]")
+        err_console.print(f"[yellow]No {title.lower()}: {result.synthesis_error}[/yellow]")
+
+
+def _render_human(result: CouncilResult) -> None:
+    """Render raw answers + synthesis to the terminal with rich."""
+    _print_skipped(result)
+    for ans in result.answers:
+        console.print(_answer_panel(ans))
+    _print_synthesis(result)
+
+
+def _render_debate(result: CouncilResult) -> None:
+    """Render a debate: a panel per member per round, then the final synthesis."""
+    _print_skipped(result)
+    for rnd in result.rounds:
+        console.rule(f"[bold]Round {rnd.round_number}[/bold]")
+        for ans in rnd.answers:
+            console.print(_answer_panel(ans, border="magenta"))
+    _print_synthesis(result, title="FINAL SYNTHESIS")
+
+
+def _render_adversarial(result: CouncilResult) -> None:
+    """Render an adversarial run: proposal, critiques, then the verdict."""
+    _print_skipped(result)
+    adv = result.adversarial
+    if adv is None:
+        err_console.print("[yellow]No adversarial result produced.[/yellow]")
+        return
+
+    console.rule(f"[bold]Proposal — {adv.proposer}[/bold]")
+    console.print(_answer_panel(adv.proposal, border="blue"))
+
+    if adv.critiques:
+        console.rule("[bold]Critiques[/bold]")
+        for crit in adv.critiques:
+            console.print(_answer_panel(crit, border="yellow"))
+
+    if adv.verdict is not None:
+        console.print(
+            Panel(
+                adv.verdict,
+                title=f"[bold green]VERDICT[/bold green] "
+                f"({adv.judge} · {adv.judge_model_id})",
+                border_style="green",
+            )
+        )
+    elif adv.verdict_error:
+        err_console.print(f"[yellow]No verdict: {adv.verdict_error}[/yellow]")
+
+
+# Mode name -> human renderer. JSON output bypasses this via model_dump.
+_RENDERERS = {
+    "synthesize": _render_human,
+    "raw": _render_human,
+    "debate": _render_debate,
+    "adversarial": _render_adversarial,
+}
+
+
+_VALID_MODES = {"synthesize", "raw", "debate", "adversarial"}
 
 
 @app.command()
@@ -88,25 +149,49 @@ def ask(
         help="Named council or comma-separated friendly names (e.g. grok,claude).",
     ),
     mode: str = typer.Option(
-        "synthesize", "--mode", "-m", help="Run mode: 'synthesize' or 'raw'."
+        "synthesize",
+        "--mode",
+        "-m",
+        help="Run mode: synthesize | raw | debate | adversarial.",
     ),
     synthesizer: Optional[str] = typer.Option(
-        None, "--synthesizer", "-s", help="Override the synthesizer model name."
+        None, "--synthesizer", "-s", help="Override the synthesizer/judge model name."
+    ),
+    rounds: int = typer.Option(
+        2, "--rounds", "-r", help="Number of debate rounds (debate mode only).", min=1
+    ),
+    proposer: Optional[str] = typer.Option(
+        None,
+        "--proposer",
+        "-p",
+        help="Proposer model name (adversarial mode; defaults to first member).",
     ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit the full result as JSON instead of panels."
     ),
 ) -> None:
-    """Fan PROMPT out to a council of models and (optionally) synthesize."""
+    """Fan PROMPT out to a council and synthesize, debate, or adversarially review."""
+    mode_lower = mode.lower()
+    if mode_lower not in _VALID_MODES:
+        err_console.print(
+            f"[red]Unknown mode '{mode}'. Choose one of: "
+            f"{', '.join(sorted(_VALID_MODES))}.[/red]"
+        )
+        raise typer.Exit(code=2)
+
     cfg = load_config()
     members = cfg.resolve_council(council)
     if not members:
         err_console.print(f"[red]No council members resolved from '{council}'.[/red]")
         raise typer.Exit(code=2)
 
-    do_synth = mode.lower() == "synthesize"
     c = Council(models=members, synthesizer=synthesizer, config=cfg)
-    result = c.ask_sync(prompt, synthesize=do_synth)
+    if mode_lower == "debate":
+        result = c.debate_sync(prompt, rounds=rounds)
+    elif mode_lower == "adversarial":
+        result = c.adversarial_sync(prompt, proposer=proposer)
+    else:
+        result = c.ask_sync(prompt, synthesize=(mode_lower == "synthesize"))
 
     if as_json:
         console.print_json(json.dumps(_result_to_dict(result)))
@@ -119,7 +204,7 @@ def ask(
         )
         raise typer.Exit(code=1)
 
-    _render_human(result)
+    _RENDERERS[result.mode](result)
 
 
 @app.command()

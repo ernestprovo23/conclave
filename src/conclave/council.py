@@ -4,11 +4,16 @@
 LiteLLM model ids, skips any member whose API key is absent, fans the prompt out
 concurrently, collects partial results even when some members fail, and (in
 synthesize mode) asks a synthesizer model to merge the answers into one.
+
+The deliberation modes (``debate``, ``adversarial``) live in :mod:`conclave.modes`
+and reuse this class's :meth:`Council.fan_out` primitive so the partial-failure
+handling is written exactly once.
 """
 
 from __future__ import annotations
 
 import asyncio
+from typing import Callable
 
 from .config import ConclaveConfig, load_config
 from .logging import get_logger
@@ -17,6 +22,11 @@ from .providers import call_model
 from .registry import key_present
 
 logger = get_logger("council")
+
+# A per-member message-list factory: given a (friendly_name, model_id) member,
+# return the OpenAI-style messages to send it. Lets each mode tailor the prompt
+# per member while sharing Council.fan_out's concurrency + partial-failure code.
+MessagesFor = Callable[[str, str], list[dict[str, str]]]
 
 _SYNTH_SYSTEM = (
     "You are the synthesizer of a council of AI models. You are given the same "
@@ -77,6 +87,56 @@ class Council:
                 skipped.append(name)
         return members, skipped
 
+    async def fan_out(
+        self,
+        members: list[tuple[str, str]],
+        messages_for: "MessagesFor",
+    ) -> list[ModelAnswer]:
+        """Fan a per-member message list out concurrently and collect results.
+
+        This is the single concurrency primitive reused by every mode (synthesize,
+        raw, debate, adversarial). It never raises for a member failure: each
+        member yields a :class:`ModelAnswer` carrying either an answer or an error.
+
+        Args:
+            members: ``(friendly_name, model_id)`` pairs to call.
+            messages_for: Callable mapping a ``(name, model_id)`` member to the
+                OpenAI-style message list to send it. Lets each mode tailor the
+                prompt per member (e.g. inject peers' prior-round answers) while
+                sharing the gather/partial-failure logic.
+
+        Returns:
+            One :class:`ModelAnswer` per member, in the same order as ``members``.
+        """
+        tasks = [
+            call_model(
+                name,
+                model_id,
+                messages_for(name, model_id),
+                temperature=self.temperature,
+                timeout=self.timeout,
+            )
+            for name, model_id in members
+        ]
+        # return_exceptions=True is belt-and-suspenders; call_model already
+        # converts provider failures into ModelAnswer.error, but this guards
+        # against any unexpected raise so one bad member can't abort the gather.
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        answers: list[ModelAnswer] = []
+        for (name, model_id), outcome in zip(members, gathered):
+            if isinstance(outcome, ModelAnswer):
+                answers.append(outcome)
+            else:
+                logger.warning("%s raised unexpectedly: %s", name, outcome)
+                answers.append(
+                    ModelAnswer(
+                        name=name,
+                        model_id=model_id,
+                        error=f"{type(outcome).__name__}: {outcome}",
+                    )
+                )
+        return answers
+
     async def ask(self, prompt: str, synthesize: bool = True) -> CouncilResult:
         """Run the council asynchronously.
 
@@ -90,39 +150,20 @@ class Council:
             result rather than raising.
         """
         members, skipped = self._available_members()
-        result = CouncilResult(prompt=prompt, skipped=skipped)
+        result = CouncilResult(
+            prompt=prompt,
+            mode="synthesize" if synthesize else "raw",
+            skipped=skipped,
+        )
 
         if not members:
             logger.warning("no council members have keys available; nothing to run")
             return result
 
-        messages = [{"role": "user", "content": prompt}]
-        tasks = [
-            call_model(
-                name,
-                model_id,
-                messages,
-                temperature=self.temperature,
-                timeout=self.timeout,
-            )
-            for name, model_id in members
-        ]
-        # return_exceptions=True is belt-and-suspenders; call_model already
-        # converts provider failures into ModelAnswer.error, but this guards
-        # against any unexpected raise so one bad member can't abort the gather.
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
-        for (name, model_id), outcome in zip(members, gathered):
-            if isinstance(outcome, ModelAnswer):
-                result.answers.append(outcome)
-            else:
-                logger.warning("%s raised unexpectedly: %s", name, outcome)
-                result.answers.append(
-                    ModelAnswer(
-                        name=name,
-                        model_id=model_id,
-                        error=f"{type(outcome).__name__}: {outcome}",
-                    )
-                )
+        base_messages = [{"role": "user", "content": prompt}]
+        result.answers = await self.fan_out(
+            members, lambda _name, _model_id: base_messages
+        )
 
         if synthesize:
             await self._synthesize(result)
@@ -151,28 +192,80 @@ class Council:
         blocks = "\n\n".join(
             f"### Answer from {a.name} ({a.model_id})\n{a.answer}" for a in usable
         )
-        synth_messages = [
-            {"role": "system", "content": _SYNTH_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"Original prompt:\n{result.prompt}\n\n"
-                    f"Council answers:\n\n{blocks}\n\n"
-                    "Now produce the consolidated answer."
-                ),
-            },
+        user_content = (
+            f"Original prompt:\n{result.prompt}\n\n"
+            f"Council answers:\n\n{blocks}\n\n"
+            "Now produce the consolidated answer."
+        )
+        answer = await self.synthesize_blocks(_SYNTH_SYSTEM, user_content)
+        if answer.ok:
+            result.synthesis = answer.answer
+        else:
+            result.synthesis_error = answer.error
+
+    async def synthesize_blocks(
+        self, system_prompt: str, user_content: str
+    ) -> ModelAnswer:
+        """Call the synthesizer model with an arbitrary system + user message.
+
+        Shared by synthesize mode, debate's final consolidation, and the
+        adversarial judge so the synthesizer call path (and its error capture)
+        is written once. Callers are responsible for checking ``key_present``
+        on the synthesizer beforehand when they need a distinct no-key message;
+        this method still returns a ``ModelAnswer.error`` if the call fails.
+
+        Args:
+            system_prompt: System instruction for the synthesizer/judge.
+            user_content: The user-role content (prompt + answers/critiques).
+
+        Returns:
+            A :class:`ModelAnswer` from the synthesizer model.
+        """
+        synth_id = self.config.resolve_model_id(self.synthesizer)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
         ]
-        synth_answer = await call_model(
+        return await call_model(
             self.synthesizer,
             synth_id,
-            synth_messages,
+            messages,
             temperature=self.temperature,
             timeout=self.timeout,
         )
-        if synth_answer.ok:
-            result.synthesis = synth_answer.answer
-        else:
-            result.synthesis_error = synth_answer.error
+
+    async def debate(self, prompt: str, rounds: int = 2) -> CouncilResult:
+        """Run a multi-round debate. See :func:`conclave.modes.run_debate`.
+
+        Round 1 is an independent fan-out; rounds 2..N show each member its
+        peers' anonymized prior answers; the synthesizer consolidates survivors.
+        """
+        from .modes import run_debate
+
+        return await run_debate(self, prompt, rounds=rounds)
+
+    async def adversarial(
+        self, prompt: str, proposer: str | None = None
+    ) -> CouncilResult:
+        """Run propose -> refute -> verdict. See :func:`conclave.modes.run_adversarial`.
+
+        ``proposer`` (friendly name) defaults to the first requested member.
+        """
+        from .modes import run_adversarial
+
+        return await run_adversarial(self, prompt, proposer=proposer)
+
+    @staticmethod
+    def _run_sync(coro_factory: Callable[[], "asyncio.Future | object"], label: str):
+        """Run an async council method synchronously, guarding nested loops."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro_factory())
+        raise RuntimeError(
+            f"{label}() called from within a running event loop; "
+            "await the async method instead"
+        )
 
     def ask_sync(self, prompt: str, synthesize: bool = True) -> CouncilResult:
         """Synchronous wrapper around :meth:`ask`.
@@ -180,10 +273,20 @@ class Council:
         Safe to call from non-async code. Raises ``RuntimeError`` if invoked
         from inside a running event loop -- use :meth:`ask` there instead.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.ask(prompt, synthesize=synthesize))
-        raise RuntimeError(
-            "ask_sync() called from within a running event loop; await ask() instead"
+        return self._run_sync(
+            lambda: self.ask(prompt, synthesize=synthesize), "ask_sync"
+        )
+
+    def debate_sync(self, prompt: str, rounds: int = 2) -> CouncilResult:
+        """Synchronous wrapper around :meth:`debate`."""
+        return self._run_sync(
+            lambda: self.debate(prompt, rounds=rounds), "debate_sync"
+        )
+
+    def adversarial_sync(
+        self, prompt: str, proposer: str | None = None
+    ) -> CouncilResult:
+        """Synchronous wrapper around :meth:`adversarial`."""
+        return self._run_sync(
+            lambda: self.adversarial(prompt, proposer=proposer), "adversarial_sync"
         )
