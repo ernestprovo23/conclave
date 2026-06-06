@@ -1,6 +1,6 @@
 # conclave — Product Design Document
 
-> **Status:** v0.1.0 shipped and working. This is the **canonical authority document** for
+> **Status:** v0.1.0 shipped; v0.2 (`debate` + `adversarial` modes) built. This is the **canonical authority document** for
 > conclave's product scope, design, and roadmap. When this document and any other doc
 > disagree, this document wins. Code is the source of truth for *current behavior*; this
 > document marks anything not yet in code as **Roadmap**.
@@ -33,13 +33,14 @@ conclave is a small, sharp tool: **a council of foundation models you can call f
 CLI command or one Python import.** Fan a prompt out to several models concurrently — each
 through *your own* API keys, no markup, no middleman — and aggregate the answers. The
 v0.1 aggregation is a **synthesizer** that merges raw answers into one consolidated
-response. The longer arc is a small set of **council modes** (debate, adversarial, vote)
-that turn a flat panel of opinions into a structured deliberation.
+response. v0.2 adds a small set of **council modes** — **debate** (multi-round) and
+**adversarial** (propose → refute → verdict) — that turn a flat panel of opinions into a
+structured deliberation; `vote` remains on the roadmap.
 
 conclave's first real use was an **adversarial design review**: a council of Grok, Gemini,
 Perplexity, and Claude critiquing a security-tool strategy and catching flaws a single
-model missed. That origin is why adversarial/debate modes are first-class in the vision,
-not a bolt-on. The product is opinionated about staying lightweight: a **library-first
+model missed. That origin is why the adversarial and debate modes are first-class — they
+are now built, not a bolt-on. The product is opinionated about staying lightweight: a **library-first
 primitive with structured results**, not an agent framework.
 
 ---
@@ -103,9 +104,9 @@ useful output. v0.1 ships one true mode plus a pass-through.
 |------|--------|--------------|
 | **synthesize** | **BUILT (v0.1)** | Fan out concurrently → collect each raw answer → a **synthesizer model** merges them into one consolidated answer, reconciling agreement, adjudicating disagreement, and flagging clearly-wrong answers. The synthesizer is instructed to rely only on the provided answers and not invent a model's position. |
 | **raw** | **BUILT (v0.1)** | Fan out and return every member's raw answer with no synthesis. Not a deliberation mode — it is "synthesize off." Exposed as `--mode raw` / `ask(..., synthesize=False)`. |
-| **debate** | **ROADMAP (v0.2+)** | N rounds where each model sees the other models' prior-round answers and may revise. Converges (or surfaces durable disagreement) over rounds. |
-| **adversarial** | **ROADMAP (v0.2+)** | Structured propose → refute → verdict. One or more models propose, others attack, a verdict model adjudicates. This is the mode that conclave's origin story (the security design review) exercised by hand. |
-| **vote** | **ROADMAP (v0.2+)** | Structured majority. Each model answers a constrained question; conclave tallies a structured vote and reports the majority plus the split. |
+| **debate** | **BUILT (v0.2)** | N rounds (`--rounds`, default 2). Round 1 is an independent fan-out; rounds 2..N show each member its peers' **anonymized** prior-round answers (`Model A/B/C`) and ask it to revise or defend. A member that errors in a round drops out of later rounds; the debate continues with survivors. The synthesizer consolidates the final round. Exposed as `--mode debate` / `Council.debate()` / `debate_sync()`. |
+| **adversarial** | **BUILT (v0.2)** | Structured propose → refute → verdict. A `--proposer` (default: first member) answers; the remaining members are CRITICS explicitly prompted to refute it; the synthesizer acts as JUDGE, weighing proposal vs. critiques and issuing a verdict + strengthened answer. This is the mode conclave's origin story (the security design review) exercised by hand. Exposed as `--mode adversarial` / `Council.adversarial()` / `adversarial_sync()`. |
+| **vote** | **ROADMAP (v0.3+)** | Structured majority. Each model answers a constrained question; conclave tallies a structured vote and reports the majority plus the split. |
 
 ### Synthesize algorithm (as built)
 1. Resolve requested friendly names to LiteLLM model ids via config.
@@ -122,6 +123,42 @@ useful output. v0.1 ships one true mode plus a pass-through.
 
 **Consensus note:** synthesize is a *generative* reconciliation, not a deterministic vote.
 It is inherently stochastic. This matters for the mcp-warden boundary in §10.
+
+### Debate algorithm (as built)
+1. Resolve + partition members (same as synthesize). Assign each member a stable
+   position-based letter label (`Model A`, `Model B`, …).
+2. **Round 1:** independent fan-out of the bare prompt (reuses `Council.fan_out`).
+3. **Rounds 2..N:** each surviving member is shown its own prior answer (told which
+   letter is "you") plus its peers' prior answers, **anonymized by letter, not brand**,
+   and asked to revise or defend. Anonymization reduces brand-bias (a model deferring to
+   or attacking another *by name*) while preserving the cross-pollination that makes
+   debate useful. The answer *body* is passed verbatim; only the attribution is relabeled.
+4. **Drop-out:** a member that errors in a round is removed from subsequent rounds; the
+   debate continues with survivors. If every member fails a round, the debate ends there.
+5. The synthesizer consolidates the final round's surviving answers (same call path as
+   synthesize, with a debate-specific system prompt).
+
+### Adversarial algorithm (as built)
+1. Resolve + partition members. Pick the proposer: `--proposer` if given, else the first
+   requested member; if that member has no key, fall back to the first available member.
+2. **Propose:** the proposer answers the prompt (single-member `fan_out`).
+3. **Refute:** every other available member is a CRITIC, explicitly prompted to find the
+   strongest flaws in the proposal (not to agree). One critic failing never aborts the run.
+   If the proposal itself failed, critics are skipped.
+4. **Verdict:** the synthesizer acts as JUDGE — given the prompt, proposal, and critiques —
+   accepting correct critiques, rejecting overstated ones, and issuing a verdict plus the
+   strengthened final answer.
+
+### Result-model extension (backward-compatible)
+The deliberation modes extend `CouncilResult` **without breaking** synthesize/raw consumers:
+- New `mode` field (`"synthesize" | "raw" | "debate" | "adversarial"`).
+- New `rounds: list[DebateRound]` (debate) and `adversarial: AdversarialResult | None`.
+- For **debate**, the final round is mirrored into the existing `answers`, and the
+  consolidated answer into the existing `synthesis`. For **adversarial**, the proposal +
+  critiques populate `answers` and the verdict mirrors into `synthesis`. Any existing
+  consumer that reads `answers`/`synthesis`/`successful_answers` keeps working unchanged;
+  new consumers read `rounds`/`adversarial` for the full structure. All fields are
+  keys-free and serialize cleanly via `model_dump()` (`--json`).
 
 ---
 
@@ -159,8 +196,10 @@ CLI (cli.py, typer+rich)   Library (from conclave import Council)
             \                         /
              v                       v
                  Council (council.py)
-        fan-out · skip-no-key · partial-results · synthesis
-                          |
+   fan_out · synthesize_blocks · skip-no-key · partial-results · synthesis
+                 |                              |
+   modes.py (debate · adversarial)      prompts.py (role templates)
+                 |
               call_model (providers.py)
         one async path · latency · token usage · error capture
                           |
@@ -173,7 +212,9 @@ CLI (cli.py, typer+rich)   Library (from conclave import Council)
 
 | Module | Responsibility |
 |--------|----------------|
-| `council.py` | `Council` — primary importable entry point. Resolves names, partitions available/skipped members, fans out concurrently, collects partial results, runs the synthesizer. Sync wrapper (`ask_sync`) guards against being called inside a running event loop. |
+| `council.py` | `Council` — primary importable entry point. Resolves names, partitions members, and exposes two reusable primitives: `fan_out` (the single concurrent + partial-failure call loop) and `synthesize_blocks` (the single synthesizer/judge call path). Hosts the public mode API: `ask`/`ask_sync` (synthesize/raw), `debate`/`debate_sync`, `adversarial`/`adversarial_sync`. Sync wrappers guard against being called inside a running event loop. |
+| `modes.py` | Deliberation orchestration: `run_debate` (multi-round, anonymized peers, drop-out) and `run_adversarial` (propose → refute → verdict). Built entirely on `Council.fan_out` + `synthesize_blocks` — no duplicated concurrency or synthesizer code. |
+| `prompts.py` | Role/template strings for debate and adversarial (member, critic, judge, debate-final system prompts) and the anonymized peer-block builder. Separates *what each role is told* from *when to call whom*. |
 | `providers.py` | `call_model` — the single async call path over `litellm.acompletion`. Captures latency, token usage, and any error into a `ModelAnswer`; never raises for provider-side failures. Sets `litellm.drop_params = True` and `litellm.telemetry = False`. |
 | `registry.py` | Single source of truth for friendly-name → model-id defaults and provider → env-var mapping. Key *presence* logic only — never key values. |
 | `config.py` | Loads/merges `~/.conclave/config.yml` over built-in defaults (`CONCLAVE_CONFIG` env var overrides path). Resolves model ids and named/CSV councils. Keys-free by construction. |
@@ -196,9 +237,9 @@ hatchling; console script `conclave = conclave.cli:app`.
 
 ---
 
-## 7. v0.1 Scope
+## 7. Scope
 
-**In scope and shipped:**
+**Shipped in v0.1:**
 - `synthesize` and `raw` modes (fan-out, partial results, synthesizer merge).
 - 5 first-class providers + pass-through for any LiteLLM model id.
 - BYO-keys via env-var name only; graceful skip of missing-key members.
@@ -208,6 +249,16 @@ hatchling; console script `conclave = conclave.cli:app`.
 - Config file: named models, named councils, default synthesizer.
 - Importable library API with sync and async entry points.
 - Test suite that mocks LiteLLM (no network, no keys required).
+
+**Added in v0.2:**
+- `debate` mode — multi-round (`--rounds`), anonymized peers, per-member drop-out on
+  failure, final synthesis. Per-round structure preserved in `CouncilResult.rounds`.
+- `adversarial` mode — `--proposer` → critics refute → synthesizer judges. Structure in
+  `CouncilResult.adversarial` (proposal / critiques / verdict).
+- Backward-compatible `CouncilResult` extension (`mode`, `rounds`, `adversarial`); existing
+  `answers`/`synthesis` consumers unaffected.
+- Both modes exposed on the `Council` library API (async + sync) and the CLI, with rich
+  per-round / proposal-critique-verdict rendering and `--json`.
 
 ---
 
@@ -225,29 +276,28 @@ hatchling; console script `conclave = conclave.cli:app`.
 - **No persistence/caching of results** in v0.1 (caching is Roadmap, §9).
 - **No streaming** in v0.1 (Roadmap, §9).
 - **No server mode** in v0.1 (possible Roadmap, §9).
-- **No debate/adversarial/vote modes** in v0.1 (Roadmap, §9 — flagged for build, not for
-  removal).
+- **No `vote` mode** yet (Roadmap, §9 — flagged for build, not for removal). `debate` and
+  `adversarial` shipped in v0.2.
 
 ---
 
-## 9. Roadmap (v0.2+, NOT yet built)
+## 9. Roadmap (v0.3+, NOT yet built)
 
 Ordered roughly by strategic value to the origin use case and to mcp-warden.
+(`adversarial` and `debate` shipped in v0.2 — see §4/§7.)
 
-1. **`adversarial` mode** — propose → refute → verdict. Directly productizes conclave's
-   first real use (security design review). High priority.
-2. **`debate` mode** — N rounds, members see each other's prior answers. Configurable
-   round count and convergence/stop criteria.
-3. **`vote` mode** — structured majority with reported split. Needs a constrained
+1. **`vote` mode** — structured majority with reported split. Needs a constrained
    answer schema so votes are comparable.
-4. **More first-class providers** — additional friendly-name defaults (e.g. more OpenAI,
+2. **Debate convergence/stop criteria** — today debate runs a fixed `--rounds`; add optional
+   early-stop when answers converge (and a configurable convergence signal).
+3. **More first-class providers** — additional friendly-name defaults (e.g. more OpenAI,
    Anthropic, Google, and open-weights endpoints LiteLLM already supports).
-5. **Caching** — optional result cache keyed on (prompt, council, mode, model ids) to make
+4. **Caching** — optional result cache keyed on (prompt, council, mode, model ids) to make
    repeated/eval runs cheap. Must remain off by default and never persist keys.
-6. **Streaming** — stream member answers and/or the synthesis to the terminal/library.
-7. **Local HTTP/server mode (under evaluation)** — a *local* server for convenience only;
+5. **Streaming** — stream member answers and/or the synthesis to the terminal/library.
+6. **Local HTTP/server mode (under evaluation)** — a *local* server for convenience only;
    must not become a hosted token path or violate the no-middleman non-goal.
-8. **Key-leak hardening** — scrub/limit provider-originated error strings before they land
+7. **Key-leak hardening** — scrub/limit provider-originated error strings before they land
    in `ModelAnswer.error` (residual risk noted in §3).
 
 **Roadmap discipline:** items are added and reprioritized freely; items are not *removed*
@@ -292,15 +342,15 @@ small primitive others embed (starting with mcp-warden).
 | Failure model | **Partial-failure resilient by construction** (failures become data) | Plugin-dependent | App must handle |
 | Keys | **BYO, env-var name only, never stored/logged** | BYO via `llm` key store | BYO, app-managed |
 | Weight | **Intentionally lightweight** — no agent runtime | Lightweight, plugin ecosystem | Heavyweight agent frameworks |
-| Modes | synthesize/raw now; **debate/adversarial/vote** planned | consortium (iterate-to-consensus) | arbitrary graphs you author |
+| Modes | synthesize/raw/**debate**/**adversarial** now; vote planned | consortium (iterate-to-consensus) | arbitrary graphs you author |
 
 **Where we are distinct:** conclave is the **library-first, structured-result,
-partial-failure-resilient** option with a **planned deliberation-mode set**
-(debate/adversarial/vote) and a strict **name-only BYO-keys** posture. We are not trying to
-beat LangGraph/AutoGen at general agent orchestration — we are deliberately the small,
-embeddable council primitive. Where `llm-consortium` overlaps conceptually (iterate-to-
-consensus), conclave differentiates on the structured result contract, the resilience
-model, and the explicit adversarial/debate roadmap rooted in the security-review origin.
+partial-failure-resilient** option with a **built deliberation-mode set** (synthesize, raw,
+debate, adversarial; vote planned) and a strict **name-only BYO-keys** posture. We are not
+trying to beat LangGraph/AutoGen at general agent orchestration — we are deliberately the
+small, embeddable council primitive. Where `llm-consortium` overlaps conceptually (iterate-
+to-consensus), conclave differentiates on the structured result contract, the resilience
+model, and the adversarial/debate modes rooted in the security-review origin.
 
 ---
 

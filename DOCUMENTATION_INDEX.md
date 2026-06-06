@@ -23,7 +23,7 @@ the canonical authority spec on top of those.
 
 | Doc | Path | Purpose |
 |-----|------|---------|
-| **Product Design Document** | [`docs/PRODUCT_DESIGN_DOCUMENT.md`](docs/PRODUCT_DESIGN_DOCUMENT.md) | **Canonical** product spec and roadmap. Problem & vision, personas, BYO-keys/key-handling security, council modes (synthesize=built; debate/adversarial/vote=roadmap), provider matrix, architecture, v0.1 scope + non-goals, roadmap, the mcp-warden dev-time boundary, licensing & positioning, open questions. **When docs disagree, the PDD wins.** |
+| **Product Design Document** | [`docs/PRODUCT_DESIGN_DOCUMENT.md`](docs/PRODUCT_DESIGN_DOCUMENT.md) | **Canonical** product spec and roadmap. Problem & vision, personas, BYO-keys/key-handling security, council modes (synthesize/raw/debate/adversarial=built; vote=roadmap), provider matrix, architecture, scope + non-goals, roadmap, the mcp-warden dev-time boundary, licensing & positioning, open questions. **When docs disagree, the PDD wins.** |
 
 ---
 
@@ -34,13 +34,15 @@ Package root: `src/conclave/` (installed as the `conclave` package; console scri
 
 | Module | Path | Responsibility |
 |--------|------|----------------|
-| Package API | [`src/conclave/__init__.py`](src/conclave/__init__.py) | Public exports: `Council`, `CouncilResult`, `ModelAnswer`, `TokenUsage`, `ConclaveConfig`, `load_config`, `__version__`. |
-| Council | [`src/conclave/council.py`](src/conclave/council.py) | Core fan-out + synthesis orchestration; primary importable entry point. |
+| Package API | [`src/conclave/__init__.py`](src/conclave/__init__.py) | Public exports: `Council`, `CouncilResult`, `ModelAnswer`, `TokenUsage`, `DebateRound`, `AdversarialResult`, `ConclaveConfig`, `load_config`, `__version__`. |
+| Council | [`src/conclave/council.py`](src/conclave/council.py) | Primary importable entry point. Reusable primitives (`fan_out`, `synthesize_blocks`) + the public mode API (`ask`/`debate`/`adversarial`, async + sync). |
+| Modes | [`src/conclave/modes.py`](src/conclave/modes.py) | `debate` (multi-round, anonymized peers, drop-out) and `adversarial` (propose → refute → verdict) orchestration, built on `Council.fan_out`/`synthesize_blocks`. |
+| Prompts | [`src/conclave/prompts.py`](src/conclave/prompts.py) | Role/template strings for debate + adversarial and the anonymized peer-block builder. |
 | Providers | [`src/conclave/providers.py`](src/conclave/providers.py) | Single async `call_model` path over LiteLLM `acompletion`; latency/usage/error capture; never raises. |
 | Registry | [`src/conclave/registry.py`](src/conclave/registry.py) | Friendly-name → model-id defaults; provider → env-var mapping; key **presence** logic (never values). |
 | Config | [`src/conclave/config.py`](src/conclave/config.py) | Loads/merges `~/.conclave/config.yml` over defaults; resolves model ids and named/CSV councils. |
-| Models | [`src/conclave/models.py`](src/conclave/models.py) | Pydantic result contract: `TokenUsage`, `ModelAnswer`, `CouncilResult`. Stable downstream surface. |
-| CLI | [`src/conclave/cli.py`](src/conclave/cli.py) | `conclave ask` + `conclave providers`; rich panels and `--json`; never prints key values. |
+| Models | [`src/conclave/models.py`](src/conclave/models.py) | Pydantic result contract: `TokenUsage`, `ModelAnswer`, `DebateRound`, `AdversarialResult`, `CouncilResult` (`mode`/`rounds`/`adversarial`). Stable downstream surface. |
+| CLI | [`src/conclave/cli.py`](src/conclave/cli.py) | `conclave ask` (synthesize/raw/debate/adversarial; `--rounds`/`--proposer`) + `conclave providers`; rich panels and `--json`; never prints key values. |
 | Logging | [`src/conclave/logging.py`](src/conclave/logging.py) | Logger factory; stderr; verbosity via `CONCLAVE_LOG_LEVEL` (default `WARNING`). |
 
 ## Tests
@@ -48,6 +50,7 @@ Package root: `src/conclave/` (installed as the `conclave` package; console scri
 | File | Path | Covers |
 |------|------|--------|
 | Council tests | [`tests/test_council.py`](tests/test_council.py) | Fan-out, partial failure, synthesis behavior. |
+| Modes tests | [`tests/test_modes.py`](tests/test_modes.py) | Debate multi-round flow, mid-round drop-out, peer anonymization; adversarial proposer/critic/verdict, proposal/critic failure paths, no-key judge, sync wrappers. |
 | Registry/config tests | [`tests/test_registry_config.py`](tests/test_registry_config.py) | Name resolution, key-presence logic, config merge. |
 | Fixtures | [`tests/conftest.py`](tests/conftest.py) | Shared fixtures; mocks LiteLLM so the suite needs no network and no API keys. |
 
@@ -58,6 +61,7 @@ Run: `pytest` (config in `pyproject.toml`, `asyncio_mode = "auto"`).
 | File | Path | Purpose |
 |------|------|---------|
 | Packaging | [`pyproject.toml`](pyproject.toml) | hatchling build, deps (litellm, pydantic, rich, typer, pyyaml), dev extras, console script, pytest config. License: MIT. |
+| License | [`LICENSE`](LICENSE) | MIT License. Copyright (c) 2026 Ernest Provo. Matches the `pyproject.toml` license field. |
 
 ---
 

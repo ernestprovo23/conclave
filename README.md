@@ -11,9 +11,10 @@ It is **library-first** (the CLI is a thin shell over the same `Council` you imp
 returns **structured results** (per-model latency, token usage, and error capture), and is
 **partial-failure resilient** — one provider erroring never aborts the run. Keys are
 **bring-your-own**, referenced by environment-variable *name* only — never stored or
-logged. v0.1 ships the `synthesize` mode (merge answers into one); `debate`, `adversarial`,
-and `vote` modes are on the roadmap. conclave is intentionally lightweight — a small
-council primitive, not an agent framework.
+logged. It ships four modes: **synthesize** (merge answers into one), **raw** (no merge),
+**debate** (multi-round, members revise after seeing peers' anonymized answers), and
+**adversarial** (propose → refute → verdict); `vote` is on the roadmap. conclave is
+intentionally lightweight — a small council primitive, not an agent framework.
 
 See the canonical spec and design docs:
 
@@ -74,9 +75,22 @@ conclave ask "Compare gRPC vs REST." -c grok,perplexity -s claude
 # Raw answers only, no synthesis
 conclave ask "Name three sorting algorithms." -c grok,perplexity --mode raw
 
-# Machine-readable output
-conclave ask "..." -c grok,perplexity --json
+# Debate: members revise over N rounds after seeing peers' anonymized answers
+conclave ask "Is a service mesh worth it for 8 services?" \
+  -c grok,gemini,claude --mode debate --rounds 3
+
+# Adversarial: one model proposes, the rest refute, the synthesizer judges
+conclave ask "Defend event sourcing for this ledger." \
+  -c grok,gemini,perplexity --mode adversarial --proposer grok
+
+# Machine-readable output (works for every mode; carries rounds/adversarial too)
+conclave ask "..." -c grok,perplexity --mode debate --json
 ```
+
+Mode flags at a glance: `--mode synthesize|raw|debate|adversarial`. `--rounds N`
+(default 2) applies to `debate`; `--proposer NAME` (default: first member) applies
+to `adversarial`. `--synthesizer/-s` overrides the synthesizer *and* the adversarial
+judge.
 
 `--council` accepts either a comma-separated list of friendly names or the name
 of a council defined in your config (see below). The built-in `default` council
@@ -101,9 +115,34 @@ for answer in result.answers:
 print("SYNTHESIS:\n", result.synthesis)
 ```
 
-`CouncilResult` exposes `answers` (per-model `ModelAnswer` with `model_id`,
+### Debate and adversarial modes
+
+```python
+council = Council(models=["grok", "gemini", "claude"], synthesizer="claude")
+
+# debate: multi-round, anonymized peers, partial-failure resilient
+debate = council.debate_sync("Is P=NP likely false?", rounds=3)   # or: await council.debate(...)
+for rnd in debate.rounds:
+    print("round", rnd.round_number, [a.name for a in rnd.successful_answers])
+print("FINAL:\n", debate.synthesis)
+
+# adversarial: propose -> refute -> verdict
+adv = council.adversarial_sync("Defend CRDTs for offline-first apps.", proposer="grok")
+print("PROPOSAL by", adv.adversarial.proposer, "->", adv.adversarial.proposal.answer)
+for crit in adv.adversarial.critiques:
+    print("CRITIQUE", crit.name, ":", crit.error or crit.answer[:80])
+print("VERDICT:\n", adv.adversarial.verdict)   # also mirrored to adv.synthesis
+```
+
+`CouncilResult` exposes `mode`, `answers` (per-model `ModelAnswer` with `model_id`,
 `latency_s`, `usage`, `error`), `synthesis`, `synthesizer`, `skipped`, plus
-`successful_answers` / `failed_answers` helpers.
+`successful_answers` / `failed_answers` helpers. For `debate` it also carries
+`rounds` (a list of `DebateRound`, each with per-member `answers`); for
+`adversarial` it carries `adversarial` (an `AdversarialResult` with `proposer`,
+`proposal`, `critiques`, `verdict`). For debate the final round is mirrored into
+`answers` and the synthesis into `synthesis`; for adversarial the proposal +
+critiques populate `answers` and the verdict mirrors into `synthesis` — so code
+written against the v0.1 surface keeps working across every mode.
 
 ## Config (optional)
 

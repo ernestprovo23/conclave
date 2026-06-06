@@ -28,10 +28,11 @@ flowchart TB
     subgraph conclave["conclave (MIT, Python 3.11+)"]
         cli["CLI<br/>conclave ask / providers<br/>(cli.py · typer + rich)"]
         lib["Library API<br/>from conclave import Council<br/>(__init__.py)"]
-        council["Council orchestrator<br/>fan-out · skip-no-key<br/>partial results · synthesis<br/>(council.py)"]
+        council["Council orchestrator<br/>fan_out · synthesize_blocks · skip-no-key<br/>synthesize / raw (council.py)"]
+        modes["Deliberation modes<br/>debate (multi-round, anonymized peers)<br/>adversarial (propose to refute to verdict)<br/>(modes.py + prompts.py)"]
         registry["Registry<br/>name to model-id<br/>key PRESENCE only, never values<br/>(registry.py)"]
         config["Config loader<br/>(config.py)"]
-        models["Result contract<br/>CouncilResult · ModelAnswer · TokenUsage<br/>(models.py)"]
+        models["Result contract<br/>CouncilResult (mode · rounds · adversarial)<br/>ModelAnswer · TokenUsage · DebateRound<br/>AdversarialResult (models.py)"]
         provider["call_model<br/>latency · token usage · error capture<br/>never raises (providers.py)"]
     end
 
@@ -60,6 +61,8 @@ flowchart TB
     %% ---- Edges: internal ----
     cli --> council
     lib --> council
+    council --> modes
+    modes -->|"reuse fan_out + synthesize_blocks"| council
     council --> provider
     provider --> models
     models --> council
