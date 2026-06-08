@@ -6,8 +6,8 @@ context diagram, and this index linking everything together. The Product Design 
 the canonical authority spec on top of those.
 
 - **Repo:** `/Users/ernestprovo/dev/conclave/`
-- **Version:** 0.1.0 · **License:** MIT
-- **Last updated:** 2026-06-07
+- **Version:** 0.1.0 (package) · **License:** MIT
+- **Last updated:** 2026-06-08
 
 ---
 
@@ -57,6 +57,8 @@ Package root: `src/conclave/` (installed as the `conclave` package; console scri
 |------|------|--------|
 | Council tests | [`tests/test_council.py`](tests/test_council.py) | Fan-out, partial failure, synthesis behavior. |
 | Modes tests | [`tests/test_modes.py`](tests/test_modes.py) | Debate multi-round flow, mid-round drop-out, peer anonymization; adversarial proposer/critic/verdict, proposal/critic failure paths, no-key judge, sync wrappers. |
+| Adapter tests | [`tests/test_adapters.py`](tests/test_adapters.py) | Per-adapter `build_request` + `parse_response` for openai-compat/anthropic/gemini: system-hoist, max_tokens, role mapping, usage parsing, empty/malformed/error-status raises. |
+| Provider highway tests | [`tests/test_providers.py`](tests/test_providers.py) | `resolve_adapter` (built-in prefixes, per-provider URLs, custom endpoints, unknown-prefix raise), end-to-end `call_model`, and `redact()` (bearer/`sk-`/env-var-value/`x-api-key` scrubbing; pre-redacted provider errors). |
 | Registry/config tests | [`tests/test_registry_config.py`](tests/test_registry_config.py) | Name resolution, key-presence logic, config merge. |
 | Fixtures | [`tests/conftest.py`](tests/conftest.py) | Shared fixtures; mocks the httpx transport so the suite needs no network and no API keys. |
 
@@ -76,6 +78,15 @@ Run: `pytest` (config in `pyproject.toml`, `asyncio_mode = "auto"`).
 | Project | Relationship |
 |---------|--------------|
 | **mcp-warden** (sibling) | Imports conclave as a **DEV-TIME** dependency (design review, taxonomy labeling). **NOT** a runtime dependency — security findings need determinism; a stochastic council is the wrong tool for runtime adjudication. See PDD §10. |
+
+## Version history
+
+| Date | Change |
+|------|--------|
+| 2026-06-08 | PDD §11 repositioned vs. new direct peers (`llm-council-core`, `the-llm-council`); §12 Q1/Q3/Q4/Q5 resolved. Index Tests table updated for the PR #2 split (`test_adapters.py`, `test_providers.py`). |
+| 2026-06-07 | v0.3 provider-highway refactor (LiteLLM removed → owned httpx transport + adapter registry); 3-core docs + PDD authored. |
+
+---
 
 ## Documentation conventions
 
