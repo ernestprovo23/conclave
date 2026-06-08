@@ -395,43 +395,80 @@ design smell — re-read this section.
 **License:** MIT (`pyproject.toml`). Permissive on purpose: conclave is meant to be a
 small primitive others embed (starting with mcp-warden).
 
+**Market reality (refreshed 2026-06-08).** Since this section was first written, the
+"ask N models and reconcile" category got crowded, and two PyPI packages now occupy
+conclave's original niche directly:
+
+- **`llm-council-core`** (`llm-council.dev`) — library-first (`from llm_council import
+  Council`), partial-results-on-timeout, direct-provider mode, anonymized peer ranking,
+  structured verdicts, and a `doctor` health check reporting `key_source`. **Closest peer.**
+- **`the-llm-council`** (PyPI) — library + CLI + agent skill, adversarial critique,
+  graceful degradation (retry/fallback/skip), JSON-schema-validated structured output.
+
+The honest consequence: **library-first + structured-result + partial-failure-resilient is
+now table-stakes, not a moat.** Debate brand-anonymization (Model A/B/C) is likewise
+**commodity** — shipped by `ai-council-mcp`, `cognition-wheel`, and `llm-council-core` —
+so we no longer market it as distinctive.
+
 **Positioning vs. prior art:**
 
-| | conclave | Simon Willison `llm` + `llm-consortium` | LangGraph / AutoGen |
-|---|---|---|---|
-| Primary surface | **Library-first** (CLI is a thin shell) | CLI/plugin first | Framework/runtime first |
-| Result shape | **Structured** (`CouncilResult`: per-model latency, token usage, error capture) | Mostly text-oriented | Rich but framework-coupled |
-| Failure model | **Partial-failure resilient by construction** (failures become data) | Plugin-dependent | App must handle |
-| Keys | **BYO, env-var name only, never stored/logged** | BYO via `llm` key store | BYO, app-managed |
-| Weight | **Intentionally lightweight** — no agent runtime | Lightweight, plugin ecosystem | Heavyweight agent frameworks |
-| Provider layer | **Owned, zero-LLM-SDK** — httpx transport + per-provider adapter registry; new OpenAI-compatible vendors via config | `llm` plugins (per-provider plugin packages) | SDK/integration-dependent |
-| Modes | synthesize/raw/**debate**/**adversarial** now; vote planned | consortium (iterate-to-consensus) | arbitrary graphs you author |
+| | conclave | `llm-council-core` (closest peer) | `llm-consortium` | LangGraph / AutoGen |
+|---|---|---|---|---|
+| Primary surface | **Library-first** (CLI is a thin shell) | Library + MCP + HTTP | CLI/plugin first | Framework/runtime first |
+| Result shape | **Telemetry-grade typed contract** (`CouncilResult`: per-model latency, token usage, typed error capture — stable for downstream like mcp-warden) | Structured verdicts (content-oriented) | XML envelope / JSON dump (content-oriented) | Rich but framework-coupled |
+| Failure model | **Partial-failure resilient by construction** (failures become data) | Partial results on timeout | Plugin-dependent | App must handle |
+| Provider access | **Direct-to-provider only — no aggregator** | OpenRouter default; direct mode optional | via `llm` plugins | SDK/integration-dependent |
+| Provider layer | **Owned, zero-LLM-SDK** — single httpx transport + adapter registry; OpenAI-compatible vendors config-only | provider SDKs / OpenRouter | `llm` per-provider plugins | SDK-dependent |
+| Keys | **Name-only, never stored/logged/serialized; provider errors `redact()`-scrubbed** | BYOK incl. encrypted keychain storage | BYO via `llm` key store | BYO, app-managed |
+| Modes | synthesize/raw/**debate**/**adversarial** now; vote planned | council + ranking | consortium (iterate-to-consensus) | arbitrary graphs you author |
 
-**Where we are distinct:** conclave is the **library-first, structured-result,
-partial-failure-resilient** option with a **built deliberation-mode set** (synthesize, raw,
-debate, adversarial; vote planned), a strict **name-only BYO-keys** posture, and an **owned,
-zero-LLM-SDK provider layer** (its own httpx transport + adapter registry, replacing the
-earlier LiteLLM dependency) that keeps the dependency footprint minimal and the provider
-seam under conclave's control. We are not trying to beat LangGraph/AutoGen at general agent
-orchestration — we are deliberately the small, embeddable council primitive. Where
-`llm-consortium` overlaps conceptually (iterate-to-consensus), conclave differentiates on
-the structured result contract, the resilience model, the owned provider layer, and the
-adversarial/debate modes rooted in the security-review origin.
+**Where we are *now* distinct** (re-anchored on the parts competitors have not replicated):
+
+1. **Owned, zero-LLM-SDK provider highway** — a single hand-owned httpx transport + adapter
+   registry, no provider SDKs, no OpenRouter. Competitors lean on aggregators or vendor SDKs;
+   none advertise an SDK-free transport they fully control. This is the most defensible claim.
+2. **Direct-keys / no-middleman as a headline, not a footnote** — conclave never requires an
+   aggregator and never proxies tokens. This is a sharper wedge than "library-first" against
+   OpenRouter-locked tools (karpathy `llm-council`) and OpenRouter-default peers.
+3. **Name-only key rigor + `redact()` scrubbing** — the value never transits any data
+   structure, is never serialized, and is scrubbed from provider error strings. (Peers offer
+   BYOK and even encrypted keychains — a different, valid posture; ours is minimal-surface.)
+4. **A telemetry-grade `CouncilResult` contract** — per-model latency + token usage + typed
+   error capture as a *stable downstream contract* (the mcp-warden dev-time dependency story),
+   not just content structure from a synthesizer.
+
+We are not trying to beat LangGraph/AutoGen at general agent orchestration — we are the
+small, embeddable council primitive. Against the new direct peers (`llm-council-core`,
+`the-llm-council`) we differentiate on the owned provider layer, the no-aggregator posture,
+the key-handling rigor, and the stable result contract — **not** on library-first/structured/
+resilient in general, which the category has caught up on.
 
 ---
 
 ## 12. Open Product Questions
 
-These need a decision and are surfaced for discussion, not resolved here:
+Decisions are recorded in place (resolved 2026-06-08 except where noted). Resolved items
+are kept here for traceability rather than deleted.
 
-1. **Synthesizer-in-council policy.** Should the default synthesizer (`claude`) be allowed
-   to also be a council member in the same run, or excluded to avoid self-reinforcement?
-2. **`vote` answer schema.** Does `vote` require a constrained/structured answer format
-   (and therefore a prompt contract), or do we tally free-text answers post hoc?
-3. **Per-member model/temperature overrides.** Today temperature and timeout are
-   council-wide. Do we want per-member overrides (and where does that live — config vs.
-   call args)?
-4. **Server mode scope.** If a local HTTP mode ships, how do we keep it from drifting into
-   a hosted token path that violates the no-middleman non-goal?
-5. **First-class provider expansion criteria.** What is the bar for promoting a raw
-   pass-through model to a friendly-name default with a key-presence mapping?
+1. **Synthesizer-in-council policy.** ✅ **RESOLVED (2026-06-08): allow, document the
+   self-reinforcement caveat, no code gate.** The default synthesizer (`claude`) may also be
+   a council member in the same run; this mirrors the common "chairman" precedent and is
+   low-stakes. The self-reinforcement risk is documented, not enforced.
+2. **`vote` answer schema.** ⏸️ **DEFERRED** — does `vote` require a constrained/structured
+   answer format (and therefore a prompt contract), or do we tally free-text answers post
+   hoc? Pending decision. Note the hidden dependency: comparable votes need enforced
+   structured-output support across all three adapters (none currently send
+   `response_format`/`tool`/`responseSchema`) — that prerequisite must land before `vote`
+   (#3) is scheduled.
+3. **Per-member model/temperature overrides.** ✅ **RESOLVED (2026-06-08): yes, at the
+   config level**, with the council-wide value as the default. Members may carry per-member
+   `model`/`temperature` overrides in config; call-args overrides are out of scope for now.
+4. **Server mode scope.** ✅ **RESOLVED (2026-06-08): localhost-bind only, no token-proxy
+   path, explicit no-middleman guard.** If a local HTTP mode ships (#8), it binds to
+   `127.0.0.1`, never becomes a hosted token path, and carries an explicit non-goal guard.
+   (Peer `llm-council-core` shipped MCP + HTTP, so precedent exists — but the no-middleman
+   non-goal §8 is load-bearing and overrides convenience.)
+5. **First-class provider expansion criteria.** ✅ **RESOLVED (2026-06-08): promote a
+   pass-through to a typed default when it is OpenAI-compatible (or a native adapter exists)
+   AND has a stable public API AND shows common demand.** The long tail stays config-only via
+   `endpoints:`.
