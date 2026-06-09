@@ -161,3 +161,121 @@ async def test_aclose_really_closes_real_client():
     assert not client.is_closed
     await transport.aclose()
     assert client.is_closed
+
+
+# --------------------------------------------------------------------------- #
+# Human (rich) renderers + the providers command. These cover the panel/table
+# rendering paths that the JSON exit-code tests bypass via model_dump.
+# --------------------------------------------------------------------------- #
+
+
+def _all_keys(monkeypatch) -> None:
+    for var in ("XAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "PERPLEXITY_API_KEY"):
+        monkeypatch.setenv(var, "dummy-key")
+
+
+def test_synthesize_human_render_prints_synthesis(monkeypatch, patch_cli_config, patch_call_model):
+    """The default synthesize mode renders member panels and a SYNTHESIS panel."""
+    _all_keys(monkeypatch)
+
+    def handler(model, messages, **kwargs):
+        from tests.conftest import make_response
+
+        # Every call (members and the synthesizer) returns a usable answer, so the
+        # synthesis runs and its panel is rendered.
+        return make_response(f"ans-{model}")
+
+    patch_call_model(handler)
+    result = runner.invoke(cli.app, ["ask", "hello", "--council", "grok,gemini"])
+    assert result.exit_code == 0
+    # Member panel titles and the synthesis header are present in the rendered output.
+    assert "grok" in result.output
+    assert "SYNTHESIS" in result.output
+
+
+def test_raw_human_render_prints_member_panels(monkeypatch, patch_cli_config, patch_call_model):
+    """Raw mode renders each member's answer panel and no synthesis header."""
+    _all_keys(monkeypatch)
+
+    def handler(model, messages, **kwargs):
+        from tests.conftest import make_response
+
+        return make_response(f"raw-{model}")
+
+    patch_call_model(handler)
+    result = runner.invoke(cli.app, ["ask", "hello", "--council", "grok,gemini", "--mode", "raw"])
+    assert result.exit_code == 0
+    assert "grok" in result.output
+    assert "gemini" in result.output
+
+
+def test_debate_human_render_prints_rounds(monkeypatch, patch_cli_config, patch_call_model):
+    """Debate mode renders a Round rule per round plus the FINAL SYNTHESIS panel."""
+    _all_keys(monkeypatch)
+
+    def handler(model, messages, **kwargs):
+        from tests.conftest import make_response
+
+        return make_response(f"debate-{model}")
+
+    patch_call_model(handler)
+    result = runner.invoke(
+        cli.app,
+        ["ask", "hello", "--council", "grok,gemini", "--mode", "debate", "--rounds", "2"],
+    )
+    assert result.exit_code == 0
+    assert "Round" in result.output
+    assert "SYNTHESIS" in result.output
+
+
+def test_adversarial_human_render_prints_proposal_and_verdict(
+    monkeypatch, patch_cli_config, patch_call_model
+):
+    """Adversarial mode renders the proposal, critiques, and a VERDICT panel."""
+    _all_keys(monkeypatch)
+
+    def handler(model, messages, **kwargs):
+        from tests.conftest import make_response
+
+        return make_response(f"adv-{model}")
+
+    patch_call_model(handler)
+    result = runner.invoke(
+        cli.app,
+        ["ask", "hello", "--council", "grok,gemini", "--mode", "adversarial"],
+    )
+    assert result.exit_code == 0
+    assert "Proposal" in result.output
+    assert "VERDICT" in result.output
+
+
+def test_skipped_members_warning_is_printed(monkeypatch, patch_cli_config, patch_call_model):
+    """A member with no key is skipped and surfaced via the yellow warning line."""
+    # Only grok has a key; gemini will be skipped for lack of GEMINI_API_KEY.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "dummy-key")
+
+    def handler(model, messages, **kwargs):
+        from tests.conftest import make_response
+
+        return make_response(f"ans-{model}")
+
+    patch_call_model(handler)
+    result = runner.invoke(cli.app, ["ask", "hello", "--council", "grok,gemini", "--mode", "raw"])
+    assert result.exit_code == 0
+    assert "Skipped (no key)" in result.output
+    assert "gemini" in result.output
+
+
+def test_providers_command_lists_keys_without_values(monkeypatch, patch_cli_config):
+    """`conclave providers` prints a table marking present/absent keys, no values."""
+    monkeypatch.setenv("XAI_API_KEY", "super-secret-value")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    result = runner.invoke(cli.app, ["providers"])
+    assert result.exit_code == 0
+    assert "conclave providers" in result.output
+    # Provider names and the env-var column appear; the secret VALUE never does.
+    assert "grok" in result.output
+    assert "XAI_API_KEY" in result.output
+    assert "super-secret-value" not in result.output
