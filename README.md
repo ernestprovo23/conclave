@@ -27,6 +27,19 @@ See the canonical spec and design docs:
 ## Install
 
 ```bash
+pip install conclave-cli
+```
+
+> **Name split (read this once).** The PyPI **distribution** name is
+> `conclave-cli` — the name `conclave` on PyPI is an *unrelated* project (a
+> blockchain client, not this one). Everything else stays `conclave`: the CLI
+> command you type is `conclave`, the package you import is `conclave`, and the
+> repo is `conclave`. So:
+> `pip install conclave-cli` → run `conclave ...` / `from conclave import Council`.
+
+From a source checkout (for development), install it editable instead:
+
+```bash
 # from the repo root
 pip install -e .
 # or with dev/test extras

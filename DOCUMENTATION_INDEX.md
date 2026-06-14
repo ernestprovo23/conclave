@@ -73,7 +73,9 @@ Run: `pytest` (config in `pyproject.toml`, `asyncio_mode = "auto"`).
 
 | File | Path | Purpose |
 |------|------|---------|
-| Packaging | [`pyproject.toml`](pyproject.toml) | hatchling build, deps (httpx, pydantic, rich, typer, pyyaml — no LLM SDK), dev extras, console script, pytest config. License: MIT. |
+| Packaging | [`pyproject.toml`](pyproject.toml) | hatchling build, deps (httpx, pydantic, rich, typer, pyyaml — no LLM SDK), dev extras, console script, pytest config. License: MIT. **PyPI distribution name `conclave-cli`** (the name `conclave` is an unrelated project); command + import stay `conclave`. |
+| Release runbook | [`RELEASING.md`](RELEASING.md) | Operator runbook: one-time PyPI OIDC Trusted-Publisher setup for `conclave-cli`, cut-a-release checklist (bump→tag→publish Release), post-release verification (Sigstore bundle, PEP 740 attestations), rollback/yank. |
+| Dev lockfile | [`requirements-dev.lock`](requirements-dev.lock) | Hash-pinned dev + runtime tree for reproducible installs/CI. Regenerate via `uv pip compile --universal --generate-hashes --python-version 3.11 --extra dev pyproject.toml -o requirements-dev.lock`. |
 | License | [`LICENSE`](LICENSE) | MIT License. Copyright (c) 2026 Ernest Provo. Matches the `pyproject.toml` license field. |
 | Security policy | [`SECURITY.md`](SECURITY.md) | BYO-keys vulnerability reporting policy: how to report, scope, and the key-handling guarantees consumers can rely on. |
 | Contributing guide | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, the BYO-keys contract for contributors, and the PR checklist (tests, ruff lint/format, coverage). |
@@ -91,6 +93,7 @@ Run: `pytest` (config in `pyproject.toml`, `asyncio_mode = "auto"`).
 
 | Date | Change |
 |------|--------|
+| 2026-06-14 | v1.0 distribution + release-engineering (PR-A): PyPI distribution name → `conclave-cli` (command + import stay `conclave`); OIDC Trusted-Publishing release workflow (`.github/workflows/release.yml`, SHA-pinned, PEP 740 attestations, Sigstore keyless signing, inert until a Release fires + publisher configured); `pip-audit` fail-closed CI job in `test.yml`; hash-pinned `requirements-dev.lock`; `RELEASING.md` operator runbook. No version bump (stays 0.3.0 until the 1.0.0 release commit). |
 | 2026-06-09 | Roadmap features shipped: adversarial proposer resilience (#9), optional result cache (#6), debate convergence early-stop (#4), 4 first-class providers groq/deepseek/mistral/together (#5), streaming for synthesize/raw (#7); tests 121→191. #8 local-server-mode spike evaluated (no-go on HTTP). Doc sync: System Context diagram now shows all 9 providers; PDD §12 resolved questions archived to `docs/archive/pdd-resolved-questions-2026-06-09.md` (PDD back under 500 lines); `config.example.yml` stale "LiteLLM" comment fixed. |
 | 2026-06-08 | v0.3.0 version bump; CI foundation (Actions matrix, ruff, coverage floor, gitleaks, branch protection); redact() custom-endpoint key-leak fix (#14); status_error consolidation + conditional temperature (#16/#22); provider-metadata single-source + import-time drift guard + config memoization (#19/#15); CLI exit-code contract + httpx client lifecycle (#17/#20); transport/cli/logging test backfill (#18); public release + community files. |
 | 2026-06-08 | PDD §11 repositioned vs. new direct peers (`llm-council-core`, `the-llm-council`); §12 Q1/Q3/Q4/Q5 resolved. Index Tests table updated for the PR #2 split (`test_adapters.py`, `test_providers.py`). |
