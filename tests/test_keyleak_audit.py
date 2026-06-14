@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+import warnings
 
 import httpx
 import pytest
@@ -673,3 +674,121 @@ async def test_stream_sse_error_drops_httpx_cause_chain(monkeypatch, mock_stream
     with pytest.raises(transport.TransportError) as excinfo:
         await drain()
     _assert_cause_chain_key_free(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# V9 -- Council installs the transport-logging guard by default (RANK 6)
+# --------------------------------------------------------------------------- #
+
+
+def _minimal_council_config() -> ConclaveConfig:
+    """A deterministic, on-disk-independent config for the guard-install tests."""
+    return ConclaveConfig(
+        models={"openai": "openai/gpt-4.1"},
+        councils={"default": ["openai"]},
+        synthesizer="openai",
+    )
+
+
+def _snapshot_transport_logger_state():
+    """Snapshot the httpx/httpcore filter lists + the one-shot guard flag."""
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    return (
+        httpx_logger,
+        httpcore_logger,
+        httpx_logger.filters[:],
+        httpcore_logger.filters[:],
+        transport._GUARD_INSTALLED,
+    )
+
+
+def test_council_init_installs_transport_guard_by_default(monkeypatch):
+    """V9 (RANK 6): constructing a Council installs the httpx/httpcore DEBUG guard.
+
+    With no ``allow_transport_debug_logging`` argument the guard is ON: after
+    construction ``_GUARD_INSTALLED`` is True, the httpcore logger carries a
+    ``_NoDebugHeadersFilter``, and a header-bearing DEBUG record is dropped. Global
+    logging state is snapshotted and restored (mirrors the V5 teardown discipline).
+    """
+    httpx_logger, httpcore_logger, saved_httpx, saved_httpcore, saved_flag = (
+        _snapshot_transport_logger_state()
+    )
+    monkeypatch.setattr(transport, "_GUARD_INSTALLED", False)
+    try:
+        Council(models=["openai"], synthesizer="openai", config=_minimal_council_config())
+
+        assert transport._GUARD_INSTALLED is True
+        guard_filter = next(
+            f for f in httpcore_logger.filters if f.__class__.__name__ == "_NoDebugHeadersFilter"
+        )
+        # A header-bearing DEBUG record on httpcore must be dropped by the guard.
+        debug_rec = httpcore_logger.makeRecord(
+            "httpcore",
+            logging.DEBUG,
+            __file__,
+            0,
+            "send_request_headers.complete return_value=[(b'Authorization', b'Bearer %s')]",
+            (PLANTED.encode(),),
+            None,
+        )
+        assert guard_filter.filter(debug_rec) is False
+    finally:
+        httpx_logger.filters = saved_httpx
+        httpcore_logger.filters = saved_httpcore
+        transport._GUARD_INSTALLED = saved_flag
+
+
+def test_council_opt_out_skips_transport_guard(monkeypatch):
+    """V9 (RANK 6 opt-out): allow_transport_debug_logging=True skips guard install.
+
+    Starting from ``_GUARD_INSTALLED = False``, constructing a Council with the
+    opt-out flag must NOT flip the flag and must NOT add a new
+    ``_NoDebugHeadersFilter`` to the httpcore logger. Global state is restored after.
+    """
+    httpx_logger, httpcore_logger, saved_httpx, saved_httpcore, saved_flag = (
+        _snapshot_transport_logger_state()
+    )
+    monkeypatch.setattr(transport, "_GUARD_INSTALLED", False)
+    filters_before = httpcore_logger.filters[:]
+    try:
+        Council(
+            models=["openai"],
+            synthesizer="openai",
+            config=_minimal_council_config(),
+            allow_transport_debug_logging=True,
+        )
+
+        # This construction must not have installed the guard.
+        assert transport._GUARD_INSTALLED is False
+        assert httpcore_logger.filters == filters_before
+    finally:
+        httpx_logger.filters = saved_httpx
+        httpcore_logger.filters = saved_httpcore
+        transport._GUARD_INSTALLED = saved_flag
+
+
+# --------------------------------------------------------------------------- #
+# V10 -- pooled client closes without a ResourceWarning (RANK 8, cheap)
+# --------------------------------------------------------------------------- #
+
+
+async def test_pooled_client_closes_without_resource_warning():
+    """V10 (RANK 8): creating then closing the pooled client emits no ResourceWarning.
+
+    A cheap close-wiring regression guard. ``_get_client()`` lazily builds the
+    pooled client; ``aclose()`` must release it cleanly. We snapshot/restore the
+    global client so this does not clobber other tests, and turn ResourceWarning
+    into an error so a leaked client surfaces immediately.
+    """
+    saved = transport._client
+    transport._client = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            client = transport._get_client()
+            assert client is not None
+            await transport.aclose()
+            assert transport._client is None
+    finally:
+        transport._client = saved

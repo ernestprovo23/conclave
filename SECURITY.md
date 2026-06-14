@@ -81,6 +81,16 @@ clean.
   The transient request `headers` dict does carry the key (it must, to authenticate),
   but it is built inside the adapter and handed straight to the transport — it is
   not retained on any object.
+- **Exception cause-chain hardening.** The transport raises its `TransportError`
+  with the cause chain dropped, so the surfaced error retains **no** reference to
+  the underlying httpx exception. That httpx exception's `.request.headers` holds
+  the live auth header; had it survived as `__cause__`/`__context__` it would be one
+  cause-chain hop from the surfaced error and would leak the key via
+  `traceback.format_exception`, `logging.exception`, or a cause-chain `repr` of a
+  transport error. `raise … from None` clears `__cause__` and sets
+  `__suppress_context__` (so no standard formatter renders the httpx exception or
+  its headers), and the transport additionally nulls `__context__` at a boundary so
+  even a direct `err.__context__` attribute walk finds no header-bearing exception.
 - **CLI.** `conclave providers` prints key **presence** and the env var **name**,
   never a value; `--json` serializes the same redacted `CouncilResult`.
 
@@ -94,17 +104,23 @@ vector below), plus the redaction/cache/streaming tests in `tests/test_providers
 `redact()` is a defense for the strings **conclave itself** produces. It is not a
 universal egress filter, and we do not claim it is. Known gaps, accepted for 1.0:
 
-- **httpx / httpcore DEBUG logging (out of band — HIGH if enabled).** httpx and
+- **httpx / httpcore DEBUG logging (out of band — guarded by default).** httpx and
   httpcore have their own loggers. At **DEBUG** level httpcore logs full request
   headers, including the `Authorization` / `x-api-key` value, to whatever handler
   the host application configured. This bypasses `redact()` entirely — it never
-  sees those records. **Guidance: do not enable httpx/httpcore DEBUG logging in a
-  process that holds real provider keys** (e.g. avoid `logging.basicConfig(level=
-  logging.DEBUG)` process-wide). For defense in depth, library consumers can call
-  `conclave.guard_transport_logging()` once at startup; it installs a filter that
-  drops httpx/httpcore **DEBUG** records (the only level that emits header content)
-  while leaving INFO+ diagnostics intact. It is **opt-in** by design — silently
-  reconfiguring another library's logging for the whole process would be surprising.
+  sees those records. The guard against it is now **default-on, opt-out**:
+  constructing a `Council` automatically calls `conclave.guard_transport_logging()`,
+  which installs a filter that drops httpx/httpcore **DEBUG** records (the only
+  level that emits header content) while leaving INFO+ diagnostics intact. The
+  guard is scoped to the `httpx`/`httpcore` loggers only — it never touches the
+  host application's root logger or any other logger. Opt out with
+  `Council(…, allow_transport_debug_logging=True)` for the rare case where you
+  need that DEBUG band in a process that holds no real keys; you remain responsible
+  for it then. Consumers using the provider functions directly **without** a
+  `Council` can install the same guard by calling `conclave.guard_transport_logging()`
+  once at startup (it is idempotent). Either way, the standing guidance remains:
+  do not enable httpx/httpcore DEBUG logging in a process that holds real provider
+  keys (e.g. avoid `logging.basicConfig(level=logging.DEBUG)` process-wide).
 - **Partial / URL-encoded / transformed key fragments.** `redact()` masks the
   exact env-var value and a fixed set of known key *shapes*. It does **not** catch
   a key that a provider has split, truncated, URL-encoded, base64-wrapped, or
@@ -134,10 +150,11 @@ universal egress filter, and we do not claim it is. Known gaps, accepted for 1.0
 | 2 | Streaming chunk path | MED | **Protected** — deltas are answer content; mid-stream errors redacted on the final answer, never streamed. Test: V2. |
 | 3 | config/transport `__repr__` in tracebacks | MED | **Protected** — no object stores a key; transient headers are not retained. Test: V3. |
 | 4 | Provider 400/422 echoing request fragments | MED | **Protected** — error capture runs through `redact()` (and `ProviderError` redacts on construction). Test: V4. |
-| 5 | httpx/httpcore DEBUG logging | HIGH (bypasses redact) | **Accepted limitation + opt-in guard** — documented above; `guard_transport_logging()` available. Test: V5. |
+| 5 | httpx/httpcore DEBUG logging | HIGH (bypasses redact) | **Default-on guard (Council installs it) + opt-out** — `Council.__init__` calls `guard_transport_logging()` automatically; opt out with `allow_transport_debug_logging=True`. Tests: V5, V9. |
 | 6 | redact() misses URL-encoded / partial fragments | MED | **Accepted limitation** — documented above; value-based pass is primary, shape patterns best-effort. |
 | 7 | Test fixtures with key-shaped strings | LOW | **Protected** — all fixtures use obviously-fake `…FAKE…` patterns; `.gitleaks.toml` allowlists the test tree only. |
 | 8 | Partial-failure catch-all error construction (audit-found; not in original map) | LOW | **Protected** — `fan_out` / `_drive_member` catch-alls now `redact()` the raw exception text too. Test: V7. |
+| 9 | TransportError cause chain retaining the httpx exception (header-bearing `.request`) | HIGH (leaks via traceback/`logging.exception`) | **Protected** — transport raises `… from None`; surfaced error keeps no `__cause__`/`__context__` ref to the httpx exception, so its auth header cannot leak via traceback/cause-chain repr. Test: V8. |
 
 ## Reporting a vulnerability
 

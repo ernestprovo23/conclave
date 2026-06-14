@@ -56,6 +56,20 @@ class Council:
             identical repeat run is served from the on-disk cache instead of
             re-calling the providers. The cache never persists API keys --
             see :mod:`conclave.cache`.
+        allow_transport_debug_logging: Opt **out** of the transport-logging guard.
+            Defaults to ``False``, which means the guard is **ON**: constructing a
+            ``Council`` installs :func:`conclave.transport.guard_transport_logging`
+            so httpx/httpcore ``DEBUG`` records -- the only band that emits request
+            headers, including the live ``Authorization``/``x-api-key`` value -- are
+            dropped before any handler formats them (key-leak audit, RANK 6). The
+            guard is idempotent, so constructing many councils installs it once. The
+            filter is scoped to the ``httpx``/``httpcore`` loggers only; it never
+            touches the host application's root logger or any other logger.
+            Set ``True`` to skip installation for the rare case where you genuinely
+            need httpx/httpcore ``DEBUG`` output in a process that does not hold real
+            keys; you remain responsible for that band then. Consumers using the
+            provider functions directly (without a ``Council``) can still call
+            :func:`conclave.guard_transport_logging` themselves.
 
     Example:
         >>> council = Council(models=["grok", "perplexity"], synthesizer="claude")
@@ -71,6 +85,7 @@ class Council:
         temperature: float = 0.7,
         timeout: float = 120.0,
         cache: bool | None = None,
+        allow_transport_debug_logging: bool = False,
     ) -> None:
         self.config = config or load_config()
         self.requested_models = list(models)
@@ -79,6 +94,15 @@ class Council:
         self.timeout = timeout
         # Explicit override wins; otherwise defer to config (off by default).
         self.cache_enabled = self.config.cache if cache is None else cache
+        # Default-on transport-logging guard (key-leak audit, RANK 6): drop
+        # httpx/httpcore DEBUG records (the only band that emits the auth header)
+        # so a process holding a real key cannot leak it via verbose transport
+        # logging, even if the host enables DEBUG app-wide. Idempotent, so many
+        # councils install it once; scoped to the httpx/httpcore loggers only.
+        # ``allow_transport_debug_logging=True`` opts out for callers who need
+        # that DEBUG band and accept the responsibility.
+        if not allow_transport_debug_logging:
+            transport.guard_transport_logging()
 
     def _available_members(self) -> tuple[list[tuple[str, str]], list[str]]:
         """Partition requested members into (available, skipped-for-no-key).
