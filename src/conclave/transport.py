@@ -13,6 +13,7 @@ response; the transport just moves bytes and reports HTTP status.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 
 import httpx
@@ -24,6 +25,69 @@ logger = get_logger("transport")
 # One shared, lazily-created client so connections are pooled across calls
 # within a process. httpx.AsyncClient is safe to share across concurrent tasks.
 _client: httpx.AsyncClient | None = None
+
+# --------------------------------------------------------------------------- #
+# httpx/httpcore debug-logging leak guard (key-leak audit, vector 5)
+# --------------------------------------------------------------------------- #
+#
+# SECURITY-CRITICAL, OUT-OF-BAND OF redact(): httpx and httpcore have their own
+# `logging` loggers. At DEBUG level httpcore logs the full request headers --
+# which include ``Authorization: Bearer <key>`` and ``x-api-key: <key>`` -- to
+# whatever handler the host application configured. conclave's ``redact()`` only
+# scrubs the error/diagnostic strings *it* produces; it cannot reach inside the
+# third-party transport loggers. So a consumer that turns on transport DEBUG
+# logging (``logging.basicConfig(level=logging.DEBUG)`` app-wide, or explicitly
+# raising the httpx/httpcore loggers) would leak live keys to their own logs,
+# entirely bypassing every redaction conclave performs.
+#
+# We cannot (and should not) globally silence another library's logging for the
+# whole process -- that would be surprising and could hide legitimate debugging.
+# Instead we expose an explicit, opt-in guard a security-conscious library
+# consumer can call once at startup. It installs a filter that drops any
+# httpx/httpcore log record at DEBUG severity (the only level that emits header
+# content), while leaving INFO+ records untouched. See SECURITY.md "Threat
+# model" for the documented trust boundary and accepted limitation.
+_TRANSPORT_LOGGER_NAMES = ("httpx", "httpcore")
+_GUARD_INSTALLED = False
+
+
+class _NoDebugHeadersFilter(logging.Filter):
+    """Drop DEBUG-level records from a transport logger (where headers appear).
+
+    httpcore emits request/response headers only at ``DEBUG``; INFO and above
+    carry no header content. Filtering exactly the DEBUG band stops the header
+    leak without suppressing useful higher-severity transport diagnostics.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Returning False discards the record before any handler formats it.
+        return record.levelno > logging.DEBUG
+
+
+def guard_transport_logging() -> None:
+    """Block httpx/httpcore DEBUG logging so auth headers can never be logged.
+
+    **Opt-in, library-mode key-leak hardening.** httpx/httpcore log full request
+    headers (including the ``Authorization``/``x-api-key`` value) at ``DEBUG``.
+    That path is outside :func:`conclave.adapters.base.redact`'s reach, so a host
+    application that enables transport DEBUG logging would leak live keys to its
+    own log sinks. Calling this once at startup installs a logging filter on the
+    ``httpx`` and ``httpcore`` loggers that discards their DEBUG records, closing
+    the leak while leaving INFO+ diagnostics intact. Idempotent.
+
+    This is intentionally **not** called automatically: silently reconfiguring a
+    third-party library's logging for the whole process would be surprising and
+    could mask legitimate debugging. A consumer that handles real keys and also
+    runs verbose transport logging should call it explicitly. The default,
+    documented guidance (SECURITY.md) is simply: do not enable httpx/httpcore
+    DEBUG logging in a process that holds real provider keys.
+    """
+    global _GUARD_INSTALLED
+    if _GUARD_INSTALLED:
+        return
+    for name in _TRANSPORT_LOGGER_NAMES:
+        logging.getLogger(name).addFilter(_NoDebugHeadersFilter())
+    _GUARD_INSTALLED = True
 
 
 class TransportError(Exception):
@@ -141,6 +205,15 @@ async def stream_sse(
                 # aread() is required before the response is consumed/closed.
                 raw = await response.aread()
                 detail = raw.decode("utf-8", "replace")[:500]
+                # KEY-LEAK NOTE (audit vector 2/4): this raw provider body may echo
+                # request fragments. It is intentionally NOT redacted here -- the
+                # transport stays provider-agnostic and never imports redact(). The
+                # single redaction boundary for the streaming path is
+                # conclave.providers.call_model_stream, which wraps every
+                # TransportError/ProviderError message in redact() before it lands on
+                # ModelAnswer.error or is logged. No streamed text delta is emitted on
+                # this path (deltas carry only parsed answer content), so the only
+                # surface for this string is that redacted final answer.
                 raise TransportError(f"HTTP {response.status_code}: {detail}")
 
             event_name = ""

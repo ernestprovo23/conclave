@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 from . import cache as cache_mod
 from . import transport
+from .adapters.base import redact
 from .config import ConclaveConfig, load_config
 from .logging import get_logger
 from .models import CouncilResult, ModelAnswer, StreamEvent
@@ -205,14 +206,13 @@ class Council:
             if isinstance(outcome, ModelAnswer):
                 answers.append(outcome)
             else:
-                logger.warning("%s raised unexpectedly: %s", name, outcome)
-                answers.append(
-                    ModelAnswer(
-                        name=name,
-                        model_id=model_id,
-                        error=f"{type(outcome).__name__}: {outcome}",
-                    )
-                )
+                # call_model already redacts and never raises, so this arm only
+                # fires on an UNEXPECTED escape. Redact the exception text anyway:
+                # the invariant "every error string conclave surfaces is scrubbed"
+                # must hold even on this defense-in-depth path (key-leak audit).
+                message = redact(f"{type(outcome).__name__}: {outcome}")
+                logger.warning("%s raised unexpectedly: %s", name, message)
+                answers.append(ModelAnswer(name=name, model_id=model_id, error=message))
         return answers
 
     async def ask(self, prompt: str, synthesize: bool = True) -> CouncilResult:
