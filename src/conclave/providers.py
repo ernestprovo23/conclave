@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 
 from . import transport
 from .adapters import ProviderError, resolve_adapter
-from .adapters.base import ProviderAdapter, redact
+from .adapters.base import OutputContract, ProviderAdapter, redact
 from .config import ConclaveConfig, load_config
 from .logging import get_logger
 from .manifest import ProviderExecutionReceipt
@@ -93,6 +93,7 @@ async def call_model(
     temperature: float = 0.7,
     timeout: float = 120.0,
     config: ConclaveConfig | None = None,
+    output_contract: OutputContract | None = None,
 ) -> ModelAnswer:
     """Call a single model and return a structured :class:`ModelAnswer`.
 
@@ -112,6 +113,13 @@ async def call_model(
             When ``None`` (a standalone call) the config is resolved via the
             memoized :func:`conclave.config.load_config`, so even repeated
             standalone calls avoid redundant disk reads (issue #15).
+        output_contract: Optional :class:`conclave.adapters.base.OutputContract`
+            requesting structured (JSON-Schema-constrained) output. It is threaded
+            verbatim to ``adapter.build_request``; the adapter performs the
+            provider-native translation (OpenAI ``response_format`` / Anthropic tool
+            ``input_schema`` / Gemini ``responseSchema``) and degrades gracefully on
+            providers that cannot enforce it. ``None`` (the default) leaves the
+            request body byte-for-byte unchanged -- the current free-prose behavior.
 
     Returns:
         A ``ModelAnswer`` with either ``answer`` populated or ``error`` set.
@@ -139,7 +147,7 @@ async def call_model(
 
     try:
         url, headers, body = adapter.build_request(
-            model_id, messages, temperature, timeout, api_key
+            model_id, messages, temperature, timeout, api_key, output_contract=output_contract
         )
         status, payload = await transport.post_json(url, headers, body, timeout)
         text, usage = adapter.parse_response(status, payload)
@@ -204,6 +212,7 @@ async def call_model_stream(
     temperature: float = 0.7,
     timeout: float = 120.0,
     config: ConclaveConfig | None = None,
+    output_contract: OutputContract | None = None,
 ) -> AsyncIterator[str | ModelAnswer]:
     """Stream a single model's answer, yielding text deltas then a final answer.
 
@@ -232,7 +241,13 @@ async def call_model_stream(
     emitted as a single chunk -- so a non-streaming provider degrades to a
     one-shot render rather than an error.
 
-    Args mirror :func:`call_model`.
+    Args mirror :func:`call_model`, including ``output_contract``: an optional
+    :class:`conclave.adapters.base.OutputContract` requesting structured
+    (JSON-Schema-constrained) output. It is threaded to ``adapter.stream_request``
+    (and, on the non-streaming fallback, on through to :func:`call_model`); the
+    adapter performs the provider-native translation and degrades gracefully where
+    unsupported. ``None`` (the default) leaves the request unchanged -- the current
+    free-prose behavior.
 
     Yields:
         ``str`` text deltas, then a final :class:`ModelAnswer`.
@@ -258,6 +273,7 @@ async def call_model_stream(
             temperature=temperature,
             timeout=timeout,
             config=resolved_config,
+            output_contract=output_contract,
         )
         if answer.answer:
             yield answer.answer
@@ -277,7 +293,7 @@ async def call_model_stream(
     usage: TokenUsage | None = None
     try:
         url, headers, body = adapter.stream_request(
-            model_id, messages, temperature, timeout, api_key
+            model_id, messages, temperature, timeout, api_key, output_contract=output_contract
         )
         async for event, data in transport.stream_sse(url, headers, body, timeout):
             delta = adapter.parse_sse_event(event, data)

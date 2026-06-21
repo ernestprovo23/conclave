@@ -24,22 +24,31 @@ ignored by the Pydantic validator. This module never imports difflib (the debate
 ``convergence_score`` text-similarity signal is a FORBIDDEN consensus measure,
 DD-1) — agreement.py enforces the same rule with a guard test.
 
-Structured-output strategy (Option A — prompt-level, verified against the code)
--------------------------------------------------------------------------------
-The CAC-05 ticket says to call the synthesizer "with an ``OutputContract``". On
-inspection of ``providers.py`` at b11ebb5, :func:`conclave.providers.call_model`
-takes ``(name, model_id, messages, *, temperature, timeout, config)`` and has **no
-``output_contract`` parameter** — the ``OutputContract`` plumbing stops at the
-adapter ``build_request`` layer, which ``call_model`` does not expose, and
-``providers.py`` is on this ticket's do-not-edit list. So this engine uses
-**prompt-level structured output**: the JSON-Schema instruction and the schema
-itself are embedded in the system/user messages, and the JSON is parsed out of
-``ModelAnswer.answer`` (tolerating a ```json code fence). Pydantic
-(:class:`conclave.verdict.VerdictExtractionModel`) is the validator — no
-``jsonschema`` dependency. This keeps the engine within the allowed file set while
-still emitting the LCD schema for the model to follow. If a future ticket adds an
-``output_contract`` kwarg to ``call_model``, the embedded schema can move to that
-kwarg with no change to the parse/validate/repair logic below.
+Structured-output strategy (native + prompt-level, belt-and-suspenders)
+----------------------------------------------------------------------
+CAC-06-PLUMB threaded an ``output_contract`` kwarg through
+:func:`conclave.providers.call_model` to ``adapter.build_request``, so the engine
+now requests structured output on TWO complementary layers:
+
+1. **Native** — :func:`extract_verdict` builds one
+   ``OutputContract(schema=verdict_extraction_json_schema(), schema_name=
+   "VerdictExtraction", strict=True)`` and passes it to BOTH ``call_model`` calls
+   (the initial extraction and the repair retry). Capable providers
+   (OpenAI/Anthropic/Gemini) translate it to their provider-native surface
+   (OpenAI ``response_format`` ``json_schema`` / Gemini ``responseSchema`` /
+   Anthropic tool ``input_schema``) and ENFORCE the schema at decode time.
+2. **Prompt-level (retained fallback)** — the same LCD JSON-Schema instruction and
+   schema stay embedded in the system/user messages, and the JSON is still parsed
+   out of ``ModelAnswer.answer`` (tolerating a ```json code fence) and validated by
+   Pydantic (:class:`conclave.verdict.VerdictExtractionModel`) — no ``jsonschema``
+   dependency. This is the belt-and-suspenders path for providers WITHOUT strict
+   structured-output support: the adapter degrades gracefully (free prose) and
+   warns, and the prompt-level parse/validate/repair below still produces a
+   conforming verdict.
+
+The native contract is ADDITIVE: it does not replace the parse/validate/repair
+fallback, and the engine's failure behavior is unchanged (graceful
+``verdict=None``).
 
 Validate → repair-once → fallback (DD-2 verdict-absent rule)
 ------------------------------------------------------------
@@ -58,7 +67,7 @@ import json
 from pydantic import BaseModel, Field, ValidationError
 
 from . import agreement
-from .adapters.base import redact
+from .adapters.base import OutputContract, redact
 from .logging import get_logger
 from .manifest import VerdictExtraction
 from .models import ModelAnswer
@@ -462,9 +471,25 @@ async def extract_verdict(
             verdict_absent_reason=_REASON_TOO_FEW,
         )
 
-    # Step 2 — one extraction call (prompt-level structured output, Option A).
+    # Step 2 — one extraction call. Request native structured output (capable
+    # providers enforce the schema) AND keep the embedded schema in the messages as
+    # the belt-and-suspenders fallback for providers without strict support. Built
+    # once and reused for the initial call and the repair retry below; schema_name
+    # matches the schema's "VerdictExtraction" title, strict requests native
+    # enforcement where available.
     messages = _build_messages(prompt, responders)
-    answer = await call_model(synthesizer_name, synthesizer_model_id, messages, config=config)
+    output_contract = OutputContract(
+        schema=verdict_extraction_json_schema(),
+        schema_name="VerdictExtraction",
+        strict=True,
+    )
+    answer = await call_model(
+        synthesizer_name,
+        synthesizer_model_id,
+        messages,
+        config=config,
+        output_contract=output_contract,
+    )
 
     # Step 3 — validate, then repair ONCE on failure, then fall back.
     extraction, errors = _parse_and_validate(answer)
@@ -482,7 +507,11 @@ async def extract_verdict(
             }
         ]
         retry = await call_model(
-            synthesizer_name, synthesizer_model_id, repair_messages, config=config
+            synthesizer_name,
+            synthesizer_model_id,
+            repair_messages,
+            config=config,
+            output_contract=output_contract,
         )
         extraction, errors = _parse_and_validate(retry)
 
