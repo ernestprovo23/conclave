@@ -14,6 +14,24 @@ async-generator engine behind :meth:`conclave.council.Council.ask_stream`: it
   identical** to the non-streaming :meth:`Council.ask` result -- so downstream
   consumers (and the cache) are unaffected.
 
+The terminal ``done`` result also carries the auditable
+:class:`conclave.manifest.ModelHarnessManifest` (CAC-04) and the structured
+verdict (CAC-05/CAC-06) -- making the "byte-for-byte identical to non-streaming"
+claim literally true rather than aspirational (CAC-06-STREAM). Both are produced
+by reusing :meth:`Council._build_manifest` and the single shared
+:meth:`Council._apply_verdict` helper, so the streaming and buffered paths cannot
+drift: the verdict object stays canonical and the manifest's verdict-provenance
+slots are populated exactly once, in one place. The assembly order mirrors
+:meth:`Council._ask_uncached` exactly -- build the manifest after the answers are
+reassembled, then (synthesize mode only) stream the synthesizer and apply the
+verdict -- so manifest -> synthesize -> verdict holds on both paths.
+
+The empty-members early return mirrors :meth:`Council._ask_uncached`'s memberless
+return: it attaches a manifest (full skip list, no receipts, VERIFIED stamp) but
+deliberately attaches **no verdict** -- a council with zero responders has nothing
+to adjudicate, and ``_apply_verdict`` is never reached in the buffered path
+either, so the streamed memberless ``done`` carries ``verdict=None`` for parity.
+
 Streaming applies to the synthesize/raw path only; ``debate``/``adversarial``
 are intentionally out of scope for this issue.
 
@@ -116,7 +134,31 @@ async def stream_ask(
         ``member_delta`` / ``member_done`` events per member (interleaved),
         then ``synthesis_delta`` / ``synthesis_done`` when synthesis runs, then
         a terminal ``done`` event whose ``result`` is the full
-        :class:`CouncilResult`.
+        :class:`CouncilResult`. That terminal result carries the auditable
+        :class:`conclave.manifest.ModelHarnessManifest` and -- in synthesize mode
+        -- the structured verdict, identical to what :meth:`Council.ask` would
+        return for the same inputs (CAC-06-STREAM).
+
+    Assembly mirrors :meth:`Council._ask_uncached` exactly so the two paths cannot
+    drift:
+
+    * **Empty members.** A manifest is attached (full skip list, no receipts,
+      VERIFIED stamp) and a ``done`` event is emitted with **no verdict** -- a
+      memberless council has nothing to adjudicate, matching the buffered path,
+      which returns before reaching :meth:`Council._apply_verdict`.
+    * **Normal path.** After the answers are reassembled in members order the
+      manifest is built (on BOTH raw and synthesize, exactly like the buffered
+      path builds it before its ``if synthesize`` block). Then, in synthesize
+      mode only, the synthesizer is streamed and -- after its stream completes --
+      the shared :meth:`Council._apply_verdict` runs, populating
+      ``result.verdict`` plus the manifest's verdict-provenance slots. Raw mode
+      never extracts a verdict (no synthesizer call), again matching the buffered
+      path. Final order: build manifest -> stream synthesis -> apply verdict ->
+      emit ``done``.
+
+    Never-raises, secret-safety, and partial-text-on-member-failure behavior are
+    unchanged: :meth:`Council._apply_verdict` and :meth:`Council._build_manifest`
+    never raise and only ever attach secret-free, VERIFIED-stamped content.
     """
     members, skipped = council._available_members()
     result = CouncilResult(
@@ -127,6 +169,15 @@ async def stream_ask(
 
     if not members:
         logger.warning("no council members have keys available; nothing to stream")
+        # Mirror Council._ask_uncached's memberless return: attach a manifest
+        # (full skip list, no receipts, VERIFIED stamp) so the streamed ``done``
+        # is auditable, but attach NO verdict. A council with zero responders has
+        # nothing to adjudicate, and the buffered path returns before reaching
+        # _apply_verdict too -- so a memberless ``done`` carries verdict=None on
+        # both paths (CAC-06-STREAM parity).
+        result.manifest = council._build_manifest(
+            mode=result.mode, members=[], skipped=skipped, answers=[]
+        )
         yield StreamEvent(type="done", result=result)
         return
 
@@ -171,9 +222,24 @@ async def stream_ask(
         for name, model_id in members
     ]
 
+    # Build the manifest after the answers exist, on BOTH raw and synthesize --
+    # exactly like Council._ask_uncached builds it before its ``if synthesize``
+    # block. _build_manifest never raises and stamps the manifest secret-safe.
+    result.manifest = council._build_manifest(
+        mode=result.mode, members=members, skipped=skipped, answers=result.answers
+    )
+
     if synthesize:
+        # Prose synthesis streams first, then the structured verdict over the SAME
+        # answers -- mirroring _ask_uncached's synthesize -> apply_verdict order.
+        # _apply_verdict lives INSIDE this block (raw mode never extracts a
+        # verdict, since it makes no synthesizer call) and runs AFTER the synthesis
+        # stream completes so it can populate the now-existing manifest's
+        # verdict-provenance slots. It is opt-out via the constructor flag and a
+        # no-op when disabled, never raises, and only attaches secret-free content.
         async for event in _stream_synthesis(council, result):
             yield event
+        await council._apply_verdict(result)
 
     yield StreamEvent(type="done", result=result)
 
