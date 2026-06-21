@@ -158,7 +158,9 @@ def test_no_injection_for_unknown_endpoint(conclave_caplog):
     adapter = _adapter("custom", "https://llm.internal.example/v1/chat/completions", "CUSTOM_KEY")
     body = _build(adapter, "custom/private-model", OutputContract(schema=_SCHEMA))
     assert "response_format" not in body
-    assert any("no capability record" in rec.getMessage().lower() for rec in conclave_caplog.records)
+    assert any(
+        "no capability record" in rec.getMessage().lower() for rec in conclave_caplog.records
+    )
 
 
 # --------------------------------------------------------------------------- #
