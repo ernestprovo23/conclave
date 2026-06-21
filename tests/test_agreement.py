@@ -20,7 +20,6 @@ from __future__ import annotations
 import pytest
 
 from conclave import agreement
-from conclave.adapters.anthropic import AnthropicAdapter
 from conclave.adapters.base import OutputContract
 from conclave.adapters.gemini import GeminiAdapter
 from conclave.adapters.openai_compat import OpenAICompatAdapter
@@ -225,10 +224,13 @@ def _openai_adapter() -> OpenAICompatAdapter:
     )
 
 
-# (adapter, model_id, key) tuples covering all three concrete adapters.
+# (adapter, model_id, key) tuples for the adapters whose OutputContract handling
+# is STILL a no-op pass-through. CAC-02-ANT implements capability-gated forced
+# tool-use shaping for the Anthropic adapter, so its case moves out of this
+# no-op guard and into tests/test_anthropic_structured.py; CAC-02-OAI and
+# CAC-02-GEM will likewise migrate their cases when they land.
 _ADAPTER_CASES = [
     (_openai_adapter(), "openai/gpt-4.1", "sk-secret"),
-    (AnthropicAdapter(), "anthropic/claude-sonnet-4-6", "sk-ant-secret"),
     (GeminiAdapter(), "gemini/gemini-2.5-pro", "AIza-secret"),
 ]
 
