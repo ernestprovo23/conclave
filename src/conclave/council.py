@@ -908,6 +908,4 @@ class Council:
 
     def vote_sync(self, prompt: str, choices: list[str]) -> CouncilResult:
         """Synchronous wrapper around :meth:`vote`."""
-        return self._run_sync(
-            lambda: self.vote(prompt, choices=choices), "vote_sync"
-        )
+        return self._run_sync(lambda: self.vote(prompt, choices=choices), "vote_sync")

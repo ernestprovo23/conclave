@@ -111,7 +111,11 @@ async def test_vote_majority_winner(monkeypatch, patch_call_model):
     """Three members: grok→A, gemini→A, claude→B → A wins."""
     _set_keys(monkeypatch)
 
-    responses = {"xai/grok-4.3": "A", "gemini/gemini-2.5-pro": "A", "anthropic/claude-sonnet-4-6": "B"}
+    responses = {
+        "xai/grok-4.3": "A",
+        "gemini/gemini-2.5-pro": "A",
+        "anthropic/claude-sonnet-4-6": "B",
+    }
 
     def handler(model_id, messages):
         return make_response(responses[model_id])
@@ -353,7 +357,16 @@ class TestCLIVoteMode:
         runner = CliRunner()
         result = runner.invoke(
             app,
-            ["ask", "Best?", "--mode", "vote", "--choices", "Alpha,Beta", "--council", "grok,claude"],
+            [
+                "ask",
+                "Best?",
+                "--mode",
+                "vote",
+                "--choices",
+                "Alpha,Beta",
+                "--council",
+                "grok,claude",
+            ],
         )
         assert result.exit_code == 0
         assert "Alpha" in result.output or "WINNER" in result.output

@@ -245,9 +245,7 @@ def _render_vote(result: CouncilResult) -> None:
 
     unparsed = [name for name, v in vote.votes.items() if v is None]
     if unparsed:
-        err_console.print(
-            f"[yellow]Unrecognised/failed responses: {', '.join(unparsed)}[/yellow]"
-        )
+        err_console.print(f"[yellow]Unrecognised/failed responses: {', '.join(unparsed)}[/yellow]")
 
     if vote.winner is not None:
         winner_text = label_to_choice.get(vote.winner, vote.winner)
